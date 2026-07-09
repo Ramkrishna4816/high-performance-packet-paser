@@ -1,0 +1,3 @@
+# Ignore compiled binaries
+packet_parser
+*.o
