@@ -40,50 +40,8 @@ At a high level, the pipeline is split into four stages:
 
 ## Diagram 1: Hardware-to-User-Space Flow
 
-This diagram traces a frame from wire arrival through kernel-space BPF evaluation into the lock-free ring buffer and out to the consumer thread.
+<img width="367" height="990" alt="image" src="https://github.com/user-attachments/assets/aaad1f8e-24b8-4352-98f5-491816b0e527" />
 
-```mermaid
-%%{init: {
-  "theme": "base",
-  "themeVariables": {
-    "background": "#ffffff",
-    "primaryColor": "#eef3f8",
-    "primaryTextColor": "#1a1a1a",
-    "primaryBorderColor": "#4a90b8",
-    "lineColor": "#6b7280",
-    "secondaryColor": "#f3f6fa",
-    "tertiaryColor": "#fdf6e3",
-    "fontFamily": "Menlo, Consolas, monospace"
-  }
-}}%%
-flowchart TB
-    A["🖧 Network Interface Card<br/>(Physical Wire)"] -->|"Raw Frame Arrival"| B["Kernel: AF_PACKET Socket<br/>(PF_PACKET / SOCK_RAW)"]
-    B --> C{"eBPF / BPF Classifier<br/>compiled filter: 'tcp or udp'"}
-    C -->|"Match: TCP/UDP"| D["Kernel-Space Copy<br/>into mmap'd Ring (libpcap)"]
-    C -->|"No Match"| X["Frame Dropped<br/>(Zero User-Space Cost)"]
-    D -->|"pcap_next_ex() poll"| E["User-Space Producer Thread"]
-    E -->|"atomic store<br/>memory_order_release"| F[["Lock-Free Circular<br/>Ring Buffer<br/>(Pre-Allocated Pool)"]]
-    F -->|"atomic load<br/>memory_order_acquire"| G["Consumer Thread:<br/>Header Parser"]
-    G --> H["Ethernet Header Decode"]
-    H --> I{"EtherType?"}
-    I -->|"0x0800"| J["IPv4 Structural Parse"]
-    I -->|"0x86DD"| K["IPv6 Structural Parse"]
-    J --> L["Transport Layer Decode<br/>(TCP / UDP)"]
-    K --> L
-    L --> M["📋 Telemetry Log Emission"]
-
-    classDef kernel fill:#eef3f8,stroke:#4a90b8,stroke-width:1.5px,color:#1a1a1a;
-    classDef user fill:#f3f6fa,stroke:#8a9bb0,stroke-width:1.5px,color:#1a1a1a;
-    classDef decision fill:#fdf6e3,stroke:#d4a437,stroke-width:1.5px,color:#1a1a1a;
-    classDef drop fill:#fbeaea,stroke:#c0392b,stroke-width:1.5px,color:#1a1a1a;
-    classDef ring fill:#e8f4ea,stroke:#5b9c6e,stroke-width:2px,color:#1a1a1a;
-
-    class A,B,D kernel;
-    class E,G,H,J,K,L,M user;
-    class C,I decision;
-    class X drop;
-    class F ring;
-```
 
 **Key property:** the only heap-independent, allocation-free path is `D → E → F → G`. The ring buffer's capacity is fixed at initialization; under sustained overload the producer stalls on backpressure rather than allocating, which is a deliberate tradeoff favoring predictable latency over unbounded buffering.
 
@@ -93,54 +51,8 @@ flowchart TB
 
 This diagram shows how the parser steps a single `const uint8_t*` cursor through the frame using computed byte offsets and structural overlays — no `memcpy` of header fields, no intermediate structs beyond the overlay itself.
 
-```mermaid
-%%{init: {
-  "theme": "base",
-  "themeVariables": {
-    "background": "#ffffff",
-    "primaryColor": "#eef3f8",
-    "primaryTextColor": "#1a1a1a",
-    "primaryBorderColor": "#4a90b8",
-    "lineColor": "#6b7280",
-    "secondaryColor": "#f3f6fa",
-    "tertiaryColor": "#fdf6e3",
-    "fontFamily": "Menlo, Consolas, monospace"
-  }
-}}%%
-flowchart LR
-    subgraph FRAME["Raw Captured Frame Buffer (const uint8_t*)"]
-        direction LR
-        A["Ethernet Header<br/>Offset: +0<br/>Size: 14 bytes<br/>struct ether_header"]
-        B["IP Header<br/>Offset: +14<br/>IPv4: 20-60 bytes (IHL)<br/>IPv6: fixed 40 bytes"]
-        C["Transport Header<br/>Offset: +14+IHL*4<br/>or +14+40<br/>TCP: 20-60B / UDP: 8B"]
-        D["Payload<br/>Offset: computed<br/>remaining bytes"]
-        A --> B --> C --> D
-    end
+<img width="1446" height="290" alt="image" src="https://github.com/user-attachments/assets/4ec07f68-45da-4c79-b2e5-0991040f3afa" />
 
-    E["ptr = packet_buffer"] --> F["Cast to ether_header*<br/>read ether_type"]
-    F --> G{"ether_type"}
-    G -->|"ETHERTYPE_IP<br/>0x0800"| H["ptr += 14<br/>Cast to ip* (IPv4)<br/>read ip_hl (IHL) & bit-mask"]
-    G -->|"ETHERTYPE_IPV6<br/>0x86DD"| I["ptr += 14<br/>Cast to ip6_hdr* (IPv6)<br/>fixed 40B header"]
-    H --> J["ptr += (ip_hl * 4)<br/>IHL-derived variable offset"]
-    I --> K["ptr += 40<br/>fixed offset, no bit-mask needed"]
-    J --> L{"ip_p protocol field"}
-    K --> M{"nxt (next header) field"}
-    L -->|"IPPROTO_TCP / UDP"| N["Cast to tcphdr* / udphdr*<br/>read ports, flags, seq"]
-    M -->|"IPPROTO_TCP / UDP"| N
-    N --> O["ptr += transport_header_len<br/>Cursor now at L4 payload"]
-
-    classDef mem fill:#f3f6fa,stroke:#8a9bb0,stroke-width:1.5px,color:#1a1a1a;
-    classDef ptr fill:#eef3f8,stroke:#4a90b8,stroke-width:1.5px,color:#1a1a1a;
-    classDef decision fill:#fdf6e3,stroke:#d4a437,stroke-width:1.5px,color:#1a1a1a;
-    classDef v4 fill:#e8f4ea,stroke:#5b9c6e,stroke-width:1.5px,color:#1a1a1a;
-    classDef v6 fill:#eef0fb,stroke:#6b6bc4,stroke-width:1.5px,color:#1a1a1a;
-
-    class A,B,C,D mem;
-    class E,F,J,K,N,O ptr;
-    class G,L,M decision;
-    class H v4;
-    class I v6;
-```
 
 **Key property:** IPv4's variable-length header (via IHL) requires a runtime-computed offset (`ip_hl * 4`), whereas IPv6's fixed 40-byte header allows a compile-time-known constant stride — the parser branches on EtherType once and then applies the correct offset arithmetic for the remainder of the walk, with zero per-field copying.
 
